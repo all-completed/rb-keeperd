@@ -11,6 +11,13 @@ Description=rb-keeperd headless Keeper (rbkeeper-unlock-v1)
 Documentation=https://github.com/all-completed/rb-keeperd/blob/main/DEPLOY.md
 Wants=network-online.target
 After=network-online.target
+# The unlock_request is signed with a timestamp the server accepts only within 120 s
+# of its own clock. A board without an RTC boots at the last shutdown time until NTP
+# answers, so wait for a synchronised clock (time-sync.target is reached only after
+# synchronisation when systemd-time-wait-sync.service is enabled, DEPLOY.md §4). The
+# daemon also retries a "stale timestamp" refusal by itself.
+Wants=time-sync.target
+After=time-sync.target
 # The identity is created by `rbkeeperd enroll`, never by the service.
 ConditionPathExists=/var/lib/rbkeeperd/identity.key
 

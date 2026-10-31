@@ -32,7 +32,8 @@ the private key, and no secret is ever read from argv or the environment.
 Exit codes:
 
 - `0`: SIGTERM or interrupt, after wiping the keys.
-- `78`: the server refused the identity (WebSocket close 1008), or the host or config is
+- `78`: the server refused the identity (WebSocket close 1008 other than a stale timestamp
+  or a replayed nonce), or the host or config is
   wrong (plain swap, a bad identity file, a failed `mlockall`). The unit doesn't restart it.
 - `2`: a usage error.
 
@@ -49,7 +50,10 @@ Exit codes:
      (X25519-HKDF-SHA256 / HKDF-SHA256 / ChaCha20-Poly1305, info `rbkeeper-unlock-v1|hid|boot_id`,
      aad `request_id`). After that the ephemeral key is zeroized.
    - It waits up to the server's 300 s. On timeout or cancel it retries with a fresh
-     nonce and ts. Deny means about 60 min of backoff; 1013 means waiting the hour;
+     nonce and ts. Deny means about 60 min of backoff; 1013 means waiting the hour.
+     1008 `stale timestamp` (clock off by more than 120 s) logs `clock is off — check NTP`
+     and asks again after 30 s, 60 s, … capped at 5 min; 1008 `replayed nonce` asks again
+     at once. Both use a fresh nonce and ts and keep the same ephemeral key. Any other
      1008 means stop with exit 78.
 3. **Keeper connection:**
    - It connects to `/api/keeper/ws` with the device token from the unlock payload and
