@@ -1,6 +1,6 @@
 [package]
 name = "rb-keeperd"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 # The locked dependency tree (icu_* via url) needs 1.88.
 rust-version = "1.88"

@@ -199,6 +199,7 @@ impl EphemeralKey {
             aad,
         )
         .map_err(|_| UnlockError::OpenFailed)?;
+        crate::hardening::lock_in_ram(&pt);
         // `sk` (x25519-dalek StaticSecret, zeroize-on-drop via the feature named in
         // Cargo.toml) is wiped as it goes out of scope here, on success and on error.
         Ok(Zeroizing::new(pt))
@@ -260,6 +261,8 @@ impl UnlockPayload {
             return Err(UnlockError::BadPayload("empty vault password"));
         }
         let vault_format = Format::parse(&raw.vault.format).map_err(|_| UnlockError::BadPayload("unsupported vault format"))?;
+        crate::hardening::lock_in_ram(raw.device_token.expose_secret().as_bytes());
+        crate::hardening::lock_in_ram(raw.vault.password.expose_secret().as_bytes());
         Ok(UnlockPayload {
             device_token: raw.device_token,
             issued_at: raw.issued_at,

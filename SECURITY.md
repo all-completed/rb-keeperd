@@ -19,3 +19,22 @@ Use GitHub's **private vulnerability reporting** on this repository
   fill. This is what "auto" means, and the desktop Keeper behaves the same way. Mark
   fields auto only if you accept that. One-time codes and `secret_request`s always
   need a person.
+- **macOS gets weaker guarantees** than Linux: no `mlockall`, `PT_DENY_ATTACH` doesn't
+  stop root, and the binary is not notarized. See README "Limits" → macOS.
+
+## Verifying a release
+
+Release binaries are built on GitHub's runners by `.github/workflows/release.yml`,
+from a `v*` tag on `main`, and published with that workflow's own `GITHUB_TOKEN`.
+Before installing one, check both:
+
+- the keyless cosign signature on `SHA256SUMS`, bound to that workflow on a `v*` tag:
+  `cosign verify-blob SHA256SUMS --signature SHA256SUMS.sig --certificate SHA256SUMS.pem
+  --certificate-identity-regexp
+  '^https://github\.com/all-completed/rb-keeperd/\.github/workflows/release\.yml@refs/tags/v'
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com` (or, offline,
+  `--bundle SHA256SUMS.sigstore.json` in place of `--signature`/`--certificate`), then the
+  archive's line in `SHA256SUMS`;
+- the build provenance: `gh attestation verify <archive> -R all-completed/rb-keeperd`.
+
+DEPLOY.md, "Install from a release", has the full commands.

@@ -3,6 +3,7 @@
 
 pub mod daemon;
 pub mod hardening;
+pub mod host;
 pub mod identity;
 pub mod logging;
 pub mod serve;

@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  rb-keeperd: headless Keeper for the remote-browser-service (rbkeeper-unlock-v1).
+  Installed by DEPLOY.md ("macOS") to /Library/LaunchDaemons/com.allcompleted.rbkeeperd.plist,
+  owned root:wheel, mode 0644. Another server: change the URL after the dash-dash-server argument.
+
+  The daemon holds the vault key and the device token in RAM only. macOS gives it
+  weaker guarantees than Linux (README "Limits", macOS): no mlockall, and
+  PT_DENY_ATTACH does not stop root.
+
+  launchd has no RestartPreventExitStatus, so the daemon is NOT kept alive: it starts
+  once per boot (RunAtLoad). Every transient failure (network, timeout, deny, 1013) is
+  retried inside the process; it exits only on SIGTERM (0), on exit 78 (the server
+  refused the identity, or plain swap / a bad identity file) or on a crash. Restarting
+  on 78 would only re-ask with a refused key, so after a stop fix the cause, then
+  `sudo launchctl kickstart -k system/com.allcompleted.rbkeeperd`.
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.allcompleted.rbkeeperd</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/bin/rbkeeperd</string>
+		<string>run</string>
+		<string>--server</string>
+		<string>https://rb.all-completed.com/</string>
+	</array>
+	<key>UserName</key>
+	<string>root</string>
+	<key>GroupName</key>
+	<string>wheel</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<false/>
+	<key>ProcessType</key>
+	<string>Standard</string>
+	<!-- 0077: nothing the daemon creates is readable by others. -->
+	<key>Umask</key>
+	<integer>63</integer>
+	<!-- No core file (the daemon also sets RLIMIT_CORE=0 itself). -->
+	<key>SoftResourceLimits</key>
+	<dict>
+		<key>Core</key>
+		<integer>0</integer>
+	</dict>
+	<key>HardResourceLimits</key>
+	<dict>
+		<key>Core</key>
+		<integer>0</integer>
+	</dict>
+	<!-- No secret is ever passed through the environment (see README.md). -->
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>RBKEEPERD_LOG</key>
+		<string>info</string>
+	</dict>
+	<!-- The daemon's log lines never hold a secret (README "Limits"). -->
+	<key>StandardErrorPath</key>
+	<string>/var/log/rbkeeperd.log</string>
+	<key>StandardOutPath</key>
+	<string>/var/log/rbkeeperd.log</string>
+</dict>
+</plist>

@@ -1,0 +1,6 @@
+# The release binaries are built with exactly this toolchain (`cargo build --release
+# --locked`); bump it in its own PR. Targets are added per job in the workflows.
+[toolchain]
+channel = "1.99.1"
+components = ["clippy"]
+profile = "minimal"
