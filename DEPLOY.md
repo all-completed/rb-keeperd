@@ -115,6 +115,25 @@ A Kubernetes node normally runs with swap off already. An encrypted swap (a `dm-
 device whose uuid starts with `CRYPT-`, e.g. a `swap` line in `/etc/crypttab`) is
 accepted as well.
 
+The clock must be right before the daemon asks for an unlock: the server refuses an
+`unlock_request` whose timestamp is more than 120 s from its own (1008 `stale timestamp`).
+The unit starts `After=time-sync.target`; make that target wait for a real sync:
+
+```sh
+sudo systemctl enable systemd-time-wait-sync.service
+timedatectl show -p NTPSynchronized                     # → NTPSynchronized=yes
+```
+
+On a board without a working RTC (many SBCs), the clock starts at the last shutdown
+time and stays there until NTP answers. If the NTP server from DHCP is slow or missing,
+add public servers:
+
+```sh
+sudo mkdir -p /etc/systemd/timesyncd.conf.d
+printf '[Time]\nNTP=time.cloudflare.com pool.ntp.org\n' | sudo tee /etc/systemd/timesyncd.conf.d/90-rbkeeperd.conf
+sudo systemctl restart systemd-timesyncd
+```
+
 ## 5. Install and start the service
 
 ```sh
@@ -199,9 +218,14 @@ A request the daemon cannot serve logs `— left for a person` and stays open.
   this happens on a revoked token (401 or 1008), a vault key mismatch, or after
   re-keying the vault on a desktop. Approve the new request.
 - **It stopped with exit 78** (`systemctl status` shows `status=78`): the server refused
-  the identity (1008, for example because the key isn't pinned or registered), there is
-  plain swap, or the config is wrong. The unit won't restart it. Fix the cause, then
-  `systemctl restart rbkeeperd`.
+  the identity (1008 `unlock_request rejected`, for example because the key isn't pinned
+  or registered), there is plain swap, or the config is wrong. The unit won't restart it.
+  Fix the cause, then `systemctl restart rbkeeperd`.
+- **`clock is off — check NTP`** (1008 `stale timestamp`): this host's clock is more than
+  120 s from the server's. This is not an exit 78: the daemon keeps running and asks again
+  with a fresh timestamp after 30 s, 60 s, … up to every 5 min, so it unlocks by itself
+  once NTP has set the clock. Check `timedatectl` and §4. A 1008 `replayed nonce` is
+  retried at once with a fresh nonce.
 - **Logs:** set `RBKEEPERD_LOG=debug` with `systemctl edit` to get more detail. The
   daemon's own lines never hold a secret at any level, and dependency crates are
   capped at `warn` so their trace output (which would include the token header) is

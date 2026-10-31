@@ -4,6 +4,7 @@
 //!   locked ──unlock_request──▶ waiting ──approved──▶ unlocked (keeper WS, fills)
 //!     ▲                          │ timeout/cancel: same EK, fresh nonce+ts
 //!     │                          │ denied: ~60 min, 1013: the hour, 1008: stop
+//!     │                          │ 1008 stale timestamp: 30 s…5 min, replayed nonce: at once
 //!     └── wipe token+password ◀──┴── keeper close 1008 / 401 / vault key mismatch
 //! ```
 //!
@@ -42,6 +43,12 @@ pub const KEEPER_WS_PATH: &str = "api/keeper/ws";
 const CLOSE_POLICY: u16 = 1008;
 const CLOSE_TRY_AGAIN_LATER: u16 = 1013;
 
+/// The 1008 reasons the server's `admit()` sends for a frame that is fine but for its
+/// `ts` or `nonce` (remote-browser-service `server/headless_keeper.py`). Every other
+/// 1008 reason (`unlock_request rejected`, `malformed …`, anything new) stays fatal.
+const REASON_STALE_TS: &str = "stale timestamp";
+const REASON_REPLAYED_NONCE: &str = "replayed nonce";
+
 /// Everything the daemon needs besides its identity. All waits are fields so the
 /// integration tests can shrink them; `Config::new` has the production values.
 #[derive(Debug, Clone)]
@@ -60,6 +67,10 @@ pub struct Config {
     /// Exponential backoff for transport failures.
     pub retry_min: Duration,
     pub retry_max: Duration,
+    /// Exponential backoff after a 1008 `stale timestamp`: this host's clock is off by
+    /// more than the server's 120 s (e.g. a board without an RTC before NTP answers).
+    pub skew_retry_min: Duration,
+    pub skew_retry_max: Duration,
     /// How long one unlock request may stay open. The server resolves it as
     /// `timeout` after 300 s (§6); waiting less would cancel it early, so this is
     /// never below 300 s in production.
@@ -86,6 +97,8 @@ impl Config {
             resolved_retry: Duration::from_secs(2),
             retry_min: Duration::from_secs(5),
             retry_max: Duration::from_secs(300),
+            skew_retry_min: Duration::from_secs(30),
+            skew_retry_max: Duration::from_secs(300),
             unlock_wait: SERVER_UNLOCK_TIMEOUT + Duration::from_secs(60),
             vault_poll: Duration::from_secs(10 * 60),
             dead_after: Duration::from_secs(90),
@@ -121,8 +134,9 @@ pub fn check_server_url(u: &Url) -> Result<(), String> {
 }
 
 /// The run cannot continue: the server refused this identity (headless close 1008:
-/// not enrolled, revoked, bad signature, clock skew). Restarting will not help, so
-/// `main` exits 78 and the unit's `RestartPreventExitStatus=78` keeps it down.
+/// not enrolled, revoked, bad signature, malformed frame). Restarting will not help, so
+/// `main` exits 78 and the unit's `RestartPreventExitStatus=78` keeps it down. A stale
+/// timestamp or a replayed nonce is retried instead (see `unlock`).
 #[derive(Debug)]
 pub struct Fatal(pub String);
 
@@ -196,6 +210,10 @@ enum Attempt {
     Denied,
     Resolved(String),
     RateLimited(String),
+    /// 1008 `stale timestamp`: the signed `ts` was outside the server's skew window.
+    StaleClock,
+    /// 1008 `replayed nonce`: the server has seen this nonce in its window.
+    ReplayedNonce,
     Rejected(String),
     Failed(String),
 }
@@ -212,15 +230,25 @@ fn new_ephemeral(cfg: &Config, identity: &Identity) -> EphemeralKey {
 }
 
 /// Ask a person on a desktop Keeper to unlock this boot, until one approves.
-/// Errors only on a 1008 refusal.
+/// Errors only on a 1008 refusal of the identity; a 1008 for the clock or the nonce
+/// asks again with a fresh ts and nonce and the same EK, as for timeout/cancel.
 pub async fn unlock(cfg: &Config, identity: &Identity) -> Result<UnlockPayload, Fatal> {
     let mut ek = new_ephemeral(cfg, identity);
     let mut backoff = Backoff::new(cfg.retry_min, cfg.retry_max);
+    let mut skew = Backoff::new(cfg.skew_retry_min, cfg.skew_retry_max);
+    let mut replays = 0u32;
     loop {
         if ek.is_spent() {
             ek = new_ephemeral(cfg, identity);
         }
-        match unlock_attempt(cfg, identity, &mut ek).await {
+        let attempt = unlock_attempt(cfg, identity, &mut ek).await;
+        if !matches!(attempt, Attempt::StaleClock) {
+            skew.reset();
+        }
+        if !matches!(attempt, Attempt::ReplayedNonce) {
+            replays = 0;
+        }
+        match attempt {
             Attempt::Unlocked(payload) => {
                 ek.wipe();
                 return Ok(payload);
@@ -239,10 +267,32 @@ pub async fn unlock(cfg: &Config, identity: &Identity) -> Result<UnlockPayload, 
                 warn!("unlock: rate limited (1013 {}); waiting {}s", reason, cfg.rate_backoff.as_secs());
                 sleep(cfg.rate_backoff).await;
             }
+            Attempt::StaleClock => {
+                let d = skew.next();
+                warn!(
+                    "unlock: server says the clock is off — check NTP (1008 {}: this host's time {} is more than 120 s from the server's); asking again in {}s",
+                    REASON_STALE_TS,
+                    now_secs(),
+                    d.as_secs()
+                );
+                sleep(d).await;
+            }
+            Attempt::ReplayedNonce => {
+                replays += 1;
+                // A fresh 128-bit nonce never repeats, so a second replay in a row is the
+                // server's doing: back off like a transport failure instead of spinning.
+                if replays == 1 {
+                    warn!("unlock: server saw this nonce before (1008 {}); asking again with a fresh one", REASON_REPLAYED_NONCE);
+                } else {
+                    let d = backoff.next();
+                    warn!("unlock: 1008 {} {} times in a row; asking again in {}s", REASON_REPLAYED_NONCE, replays, d.as_secs());
+                    sleep(d).await;
+                }
+            }
             Attempt::Rejected(reason) => {
                 ek.wipe();
                 return Err(Fatal(format!(
-                    "server refused this identity (1008 {}); is it enrolled on a Keeper and the clock in sync?",
+                    "server refused this identity (1008 {}); is it enrolled and pinned on a Keeper?",
                     reason
                 )));
             }
@@ -332,7 +382,11 @@ async fn await_answer(cfg: &Config, identity: &Identity, ek: &mut EphemeralKey, 
             Message::Close(frame) => {
                 let reason = reason_text(&frame);
                 return match close_code(&frame) {
-                    Some(CLOSE_POLICY) => Attempt::Rejected(reason),
+                    Some(CLOSE_POLICY) => match reason.as_str() {
+                        REASON_STALE_TS => Attempt::StaleClock,
+                        REASON_REPLAYED_NONCE => Attempt::ReplayedNonce,
+                        _ => Attempt::Rejected(reason),
+                    },
                     Some(CLOSE_TRY_AGAIN_LATER) => Attempt::RateLimited(reason),
                     code => Attempt::Failed(format!("closed {:?} {} without an answer", code, reason)),
                 };
@@ -599,6 +653,7 @@ mod tests {
         assert!(cfg.unlock_wait > SERVER_UNLOCK_TIMEOUT, "§6: the server resolves at 300 s; never cut it short");
         assert_eq!(cfg.deny_backoff, Duration::from_secs(3600));
         assert_eq!(cfg.vault_poll, Duration::from_secs(600));
+        assert_eq!((cfg.skew_retry_min, cfg.skew_retry_max), (Duration::from_secs(30), Duration::from_secs(300)));
     }
 
     #[test]

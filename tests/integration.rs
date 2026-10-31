@@ -241,6 +241,8 @@ fn config(port: u16) -> Config {
     c.resolved_retry = Duration::from_millis(20);
     c.retry_min = Duration::from_millis(20);
     c.retry_max = Duration::from_millis(200);
+    c.skew_retry_min = Duration::from_millis(300);
+    c.skew_retry_max = Duration::from_millis(600);
     c.unlock_wait = Duration::from_secs(5);
     c.vault_poll = Duration::from_secs(60);
     c.dead_after = Duration::from_secs(5);
@@ -332,7 +334,11 @@ fn fill_request(rid: &str, fields: Value) -> Value {
 }
 
 fn spawn_daemon(port: u16) -> tokio::task::JoinHandle<Result<(), daemon::Fatal>> {
-    tokio::spawn(daemon::run(config(port), identity()))
+    spawn_daemon_with(config(port))
+}
+
+fn spawn_daemon_with(cfg: Config) -> tokio::task::JoinHandle<Result<(), daemon::Fatal>> {
+    tokio::spawn(daemon::run(cfg, identity()))
 }
 
 // ───────────────────────────── tests ─────────────────────────────
@@ -469,14 +475,100 @@ async fn close_1013_waits_the_rate_window() {
 #[tokio::test]
 async fn close_1008_on_unlock_is_fatal() {
     capture_logs();
+    // The server's identity refusal, its malformed-frame refusal, and a reason it may
+    // add later all stop the daemon (main maps the Fatal to exit 78).
+    for reason in ["unlock_request rejected", "malformed unlock_request", "something new"] {
+        let mut m = start_mock(vault_body(Format::Sha256V2, PASSWORD, 1)).await;
+        let d = spawn_daemon(m.port);
+        let (_first, mut ws) = next_headless(&mut m).await;
+        close(&mut ws, 1008, reason).await;
+        let res = timeout(WAIT, d).await.expect("run returns").unwrap();
+        let err = res.expect_err("1008 stops the daemon");
+        assert!(err.0.contains("1008") && err.0.contains(reason), "{}", err.0);
+        assert!(timeout(QUIET, m.headless.recv()).await.is_err(), "no further request after 1008 {}", reason);
+    }
+}
+
+#[tokio::test]
+async fn close_1008_stale_timestamp_backs_off_and_asks_again() {
+    capture_logs();
     let mut m = start_mock(vault_body(Format::Sha256V2, PASSWORD, 1)).await;
-    let d = spawn_daemon(m.port);
+    let mut cfg = config(m.port);
+    // Over a second, so the retry's `ts` must differ if it is really re-stamped.
+    cfg.skew_retry_min = Duration::from_millis(1100);
+    cfg.skew_retry_max = Duration::from_millis(2200);
+    let d = spawn_daemon_with(cfg);
+
+    let (first, mut ws) = next_headless(&mut m).await;
+    assert_valid_request(&first, &identity());
+    let t0 = tokio::time::Instant::now();
+    close(&mut ws, 1008, "stale timestamp").await;
+    let (second, mut ws) = next_headless(&mut m).await;
+    assert!(t0.elapsed() >= Duration::from_millis(1100), "waited skew_retry_min, not {:?}", t0.elapsed());
+    assert!(!d.is_finished(), "a stale timestamp never stops the daemon");
+    assert_valid_request(&second, &identity());
+    assert_ne!(second["nonce"], first["nonce"], "fresh nonce");
+    assert!(second["ts"].as_i64() > first["ts"].as_i64(), "fresh ts: {} then {}", first["ts"], second["ts"]);
+    assert_eq!(second["eph_pub"], first["eph_pub"], "the unspent EK is reused");
+
+    // Still off: the wait doubles.
+    let t1 = tokio::time::Instant::now();
+    close(&mut ws, 1008, "stale timestamp").await;
+    let (third, mut ws) = next_headless(&mut m).await;
+    assert!(t1.elapsed() >= Duration::from_millis(2200), "backoff doubled, not {:?}", t1.elapsed());
+    assert_ne!(third["nonce"], second["nonce"]);
+    assert_eq!(third["eph_pub"], first["eph_pub"]);
+
+    // The clock is fixed: the mock accepts and a Keeper approves.
+    approve(&mut ws, &third, "r3", &payload(Format::Sha256V2)).await;
+    let (_auth, mut kws) = next_keeper(&mut m).await;
+    assert_eq!(recv_json(&mut kws, WAIT).await.unwrap()["type"], "device_info");
+    assert!(!d.is_finished());
+    d.abort();
+    assert!(log_text().contains("clock is off — check NTP"), "the WARN names the clock");
+    assert_no_secret_logged(&[]);
+}
+
+#[tokio::test]
+async fn close_1008_replayed_nonce_asks_again_at_once() {
+    capture_logs();
+    let mut m = start_mock(vault_body(Format::Sha256V2, PASSWORD, 1)).await;
+    let mut cfg = config(m.port);
+    cfg.skew_retry_min = Duration::from_secs(30);
+    cfg.retry_min = Duration::from_secs(30);
+    let d = spawn_daemon_with(cfg);
+
+    let (first, mut ws) = next_headless(&mut m).await;
+    close(&mut ws, 1008, "replayed nonce").await;
+    // Any backoff here would be 30 s; the retry comes well before that.
+    let (second, mut ws) = timeout(Duration::from_secs(10), m.headless.recv()).await.expect("an immediate retry").unwrap();
+    assert!(!d.is_finished(), "a replayed nonce never stops the daemon");
+    assert_valid_request(&second, &identity());
+    assert_ne!(second["nonce"], first["nonce"], "fresh nonce");
+    assert!(second["ts"].as_i64() >= first["ts"].as_i64());
+    assert_eq!(second["eph_pub"], first["eph_pub"], "the unspent EK is reused");
+    approve(&mut ws, &second, "r2", &payload(Format::Sha256V2)).await;
+    next_keeper(&mut m).await;
+    d.abort();
+    assert_no_secret_logged(&[]);
+}
+
+#[tokio::test]
+async fn repeated_replayed_nonces_back_off() {
+    capture_logs();
+    let mut m = start_mock(vault_body(Format::Sha256V2, PASSWORD, 1)).await;
+    let mut cfg = config(m.port);
+    cfg.retry_min = Duration::from_millis(300);
+    let d = spawn_daemon_with(cfg);
     let (_first, mut ws) = next_headless(&mut m).await;
-    close(&mut ws, 1008, "unknown headless_id").await;
-    let res = timeout(WAIT, d).await.expect("run returns").unwrap();
-    let err = res.expect_err("1008 stops the daemon");
-    assert!(err.0.contains("1008"), "{}", err.0);
-    assert!(timeout(QUIET, m.headless.recv()).await.is_err(), "no further request after 1008");
+    close(&mut ws, 1008, "replayed nonce").await;
+    let (_second, mut ws) = next_headless(&mut m).await;
+    let t0 = tokio::time::Instant::now();
+    close(&mut ws, 1008, "replayed nonce").await;
+    let (_third, _ws) = next_headless(&mut m).await;
+    assert!(t0.elapsed() >= Duration::from_millis(300), "a second replay in a row waits retry_min, not {:?}", t0.elapsed());
+    assert!(!d.is_finished());
+    d.abort();
 }
 
 #[tokio::test]
