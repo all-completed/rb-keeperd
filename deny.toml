@@ -1,0 +1,40 @@
+# cargo-deny (CI: .github/workflows/ci.yml). Checks the locked dependency tree for
+# RustSec advisories, licenses that are not permissive, and crates from anywhere
+# but crates.io.
+
+[graph]
+targets = [
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+]
+all-features = false
+
+[advisories]
+# Vulnerabilities, unsound and yanked crates fail; so do unmaintained crates in
+# the whole tree.
+yanked = "deny"
+unmaintained = "all"
+ignore = []
+
+[licenses]
+confidence-threshold = 0.9
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+]
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

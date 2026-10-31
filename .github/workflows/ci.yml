@@ -1,0 +1,69 @@
+# Tests, lints and dependency checks on every PR and on main. Every action is
+# pinned by commit SHA (Dependabot bumps them); the toolchain comes from
+# rust-toolchain.toml.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # Linux x86_64 + arm64, macOS Apple Silicon + Intel: each target's own runner.
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Toolchain (rust-toolchain.toml)
+        run: rustup toolchain install && rustc --version
+      - name: cargo test
+        run: cargo test --locked
+      - name: cargo clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: launchd plist is valid
+        if: runner.os == 'macOS'
+        run: plutil -lint packaging/macos/com.allcompleted.rbkeeperd.plist
+      - name: "Smoke test: --help, enroll, pubkey, run hardening; Linux: exit 78 on plain swap"
+        run: |
+          cargo build --release --locked
+          ci/smoke.sh target/release/rbkeeperd
+
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-24.04
+    env:
+      CARGO_DENY_VERSION: "0.20.2"
+      CARGO_DENY_SHA256: 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Toolchain (rust-toolchain.toml)
+        run: rustup toolchain install && rustc --version
+      - name: Install cargo-deny (pinned release, checked by SHA-256)
+        run: |
+          name="cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl"
+          curl -sSfL -o "$RUNNER_TEMP/$name.tar.gz" \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/$name.tar.gz"
+          echo "${CARGO_DENY_SHA256}  $RUNNER_TEMP/$name.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$name.tar.gz" -C "$RUNNER_TEMP"
+          install -m 0755 "$RUNNER_TEMP/$name/cargo-deny" "$HOME/.cargo/bin/cargo-deny"
+      - name: cargo deny check (advisories, licenses, bans, sources)
+        run: cargo deny --locked check

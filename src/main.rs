@@ -6,20 +6,25 @@ use std::process::ExitCode;
 use log::{error, info};
 use rb_keeperd::daemon::{self, Config};
 use rb_keeperd::identity::{Identity, DEFAULT_IDENTITY_PATH};
-use rb_keeperd::{hardening, logging};
+use rb_keeperd::{hardening, host, logging};
 
 /// The unit's `RestartPreventExitStatus=78` (EX_CONFIG): the server refused this
 /// identity, or the host is not set up; restarting would only repeat it.
 const EXIT_CONFIG: u8 = 78;
 
-const USAGE: &str = "usage:
+fn usage() -> String {
+    format!(
+        "usage:
   rbkeeperd enroll [--identity PATH]      create the identity once; print its public key and fingerprint
   rbkeeperd pubkey [--identity PATH]      print the public key and fingerprint of an existing identity
   rbkeeperd run --server URL [--identity PATH]
                                           unlock through a desktop Keeper and serve auto-fills
 
-The identity defaults to /var/lib/rbkeeperd/identity.key. No secret is ever read
-from argv or the environment.";
+The identity defaults to {}. No secret is ever read
+from argv or the environment.",
+        DEFAULT_IDENTITY_PATH
+    )
+}
 
 struct Args {
     command: String,
@@ -51,10 +56,6 @@ fn print_identity(identity: &Identity) {
     println!("fingerprint: {}", identity.fingerprint());
 }
 
-fn read_trimmed(path: &str) -> Result<String, String> {
-    std::fs::read_to_string(path).map(|s| s.trim().to_string()).map_err(|e| format!("read {}: {}", path, e))
-}
-
 fn run(args: &Args) -> Result<(), (u8, String)> {
     let config_err = |m: String| (EXIT_CONFIG, m);
     let server = args.server.as_deref().ok_or_else(|| config_err("run needs --server URL".into()))?;
@@ -62,12 +63,13 @@ fn run(args: &Args) -> Result<(), (u8, String)> {
     daemon::check_server_url(&server).map_err(config_err)?;
 
     // Before any secret exists in the process, and before the runtime starts threads.
-    hardening::harden_process().map_err(|e| config_err(e.to_string()))?;
+    let applied = hardening::harden_process().map_err(|e| config_err(e.to_string()))?;
     hardening::check_swap().map_err(|e| config_err(e.to_string()))?;
+    info!("hardening: {}; swap is off or encrypted", applied);
 
     let identity = Identity::load(&args.identity).map_err(|e| config_err(e.to_string()))?;
-    let boot_id = read_trimmed("/proc/sys/kernel/random/boot_id").map_err(config_err)?;
-    let hostname = read_trimmed("/proc/sys/kernel/hostname").unwrap_or_else(|_| "headless".into());
+    let boot_id = host::boot_id().map_err(config_err)?;
+    let hostname = host::hostname().unwrap_or_else(|| "headless".into());
     let cfg = Config::new(server, hostname, boot_id);
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -96,7 +98,7 @@ fn main() -> ExitCode {
             if !m.is_empty() {
                 eprintln!("rbkeeperd: {}", m);
             }
-            eprintln!("{}", USAGE);
+            eprintln!("{}", usage());
             return ExitCode::from(if m.is_empty() { 0 } else { 2 });
         }
     };
@@ -114,7 +116,7 @@ fn main() -> ExitCode {
         "pubkey" => Identity::load(&args.identity).map(|i| print_identity(&i)).map_err(|e| (1, e.to_string())),
         "run" => run(&args),
         other => {
-            eprintln!("rbkeeperd: unknown command {:?}\n{}", other, USAGE);
+            eprintln!("rbkeeperd: unknown command {:?}\n{}", other, usage());
             return ExitCode::from(2);
         }
     };

@@ -18,7 +18,10 @@ use rand::RngCore;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
+#[cfg(not(target_os = "macos"))]
 pub const DEFAULT_IDENTITY_PATH: &str = "/var/lib/rbkeeperd/identity.key";
+#[cfg(target_os = "macos")]
+pub const DEFAULT_IDENTITY_PATH: &str = "/Library/Application Support/rbkeeperd/identity.key";
 const SEED_LEN: usize = 32;
 
 #[derive(Debug)]

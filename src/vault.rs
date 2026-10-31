@@ -130,6 +130,7 @@ pub fn decrypt(
 ) -> Result<Zeroizing<Vec<u8>>, VaultError> {
     let envelope = Zeroizing::new(B64.decode(ciphertext_b64).map_err(|_| VaultError::Corrupt("ciphertext is not base64"))?);
     let (master, body) = open_envelope(format, password, &envelope)?;
+    crate::hardening::lock_in_ram(&master[..]);
     if let Some(expected) = secret_id {
         if !expected.is_empty() && secret_id_from_master(&master) != expected {
             return Err(VaultError::KeyMismatch);
@@ -140,6 +141,7 @@ pub fn decrypt(
     let pt = cipher
         .decrypt(Nonce::from_slice(iv), Payload { msg: rest, aad: b"" })
         .map_err(|_| VaultError::Corrupt("AES-GCM authentication failed"))?;
+    crate::hardening::lock_in_ram(&pt);
     Ok(Zeroizing::new(pt))
 }
 
@@ -182,6 +184,7 @@ impl Vault {
         let blob: Zeroizing<String> = Zeroizing::new(
             String::from_utf8(plaintext.to_vec()).map_err(|_| VaultError::Corrupt("plaintext is not UTF-8"))?,
         );
+        crate::hardening::lock_in_ram(blob.as_bytes());
         let mut v: Value = serde_json::from_str(&blob).map_err(|_| VaultError::Corrupt("plaintext is not JSON"))?;
         let mut fields = HashMap::new();
         if let Some(Value::Object(map)) = v.get_mut("fields") {
@@ -192,7 +195,10 @@ impl Vault {
                 }
                 let auto = e.get("auto").map(truthy).unwrap_or(false);
                 if let Some(Value::String(s)) = e.remove("value") {
-                    fields.insert(k, Entry { value: SecretString::from(s), auto });
+                    // Lock the final buffer: `SecretString::from` may move it.
+                    let value = SecretString::from(s);
+                    crate::hardening::lock_in_ram(value.expose_secret().as_bytes());
+                    fields.insert(k, Entry { value, auto });
                 }
             }
         }
