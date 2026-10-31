@@ -19,7 +19,7 @@ base64 = "0.22"
 data-encoding = "2"
 ed25519-dalek = { version = "2", features = ["zeroize"] }
 hex = "0.4"
-hpke = { version = "0.12", default-features = false, features = ["x25519", "alloc"] }
+hpke = { version = "0.15", default-features = false, features = ["x25519", "alloc"] }
 libc = "0.2"
 log = { version = "0.4", features = ["std"] }
 pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
