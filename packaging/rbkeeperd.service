@@ -1,0 +1,60 @@
+# rb-keeperd — headless Keeper for the remote-browser-service (rbkeeper-unlock-v1).
+# Installed by DEPLOY.md to /etc/systemd/system/rbkeeperd.service.
+# Another server: override ExecStart with `systemctl edit rbkeeperd` (DEPLOY.md §5).
+#
+# The daemon holds the vault key and the device token in RAM only. The unit keeps
+# those pages out of core dumps and swap and out of reach of other services; it
+# cannot keep them from root on this host.
+
+[Unit]
+Description=rb-keeperd headless Keeper (rbkeeper-unlock-v1)
+Documentation=https://github.com/all-completed/rb-keeperd/blob/main/DEPLOY.md
+Wants=network-online.target
+After=network-online.target
+# The identity is created by `rbkeeperd enroll`, never by the service.
+ConditionPathExists=/var/lib/rbkeeperd/identity.key
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/rbkeeperd run --server https://rb.all-completed.com/
+# 78 = the server refused this identity (1008) or the config is wrong: restarting
+# would only ask again with the same refused key, so stop and leave it to a person.
+Restart=on-failure
+RestartSec=10
+RestartPreventExitStatus=78
+# SIGTERM wipes the keys and exits 0.
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+# RAM only: no core file, every page lockable (the daemon calls mlockall itself).
+LimitCORE=0
+LimitMEMLOCK=infinity
+
+# Sandbox. Nothing below blocks mlockall, prctl or outbound HTTPS.
+NoNewPrivileges=yes
+UMask=0077
+ProtectSystem=strict
+ReadWritePaths=/var/lib/rbkeeperd
+ProtectHome=yes
+PrivateTmp=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=CAP_IPC_LOCK
+AmbientCapabilities=
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+# No secret is ever passed through the environment (see README.md).
+Environment=RBKEEPERD_LOG=info
+
+[Install]
+WantedBy=multi-user.target

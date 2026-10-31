@@ -1,0 +1,55 @@
+[package]
+name = "rb-keeperd"
+version = "0.1.0"
+edition = "2021"
+# The locked dependency tree (icu_* via url) needs 1.88.
+rust-version = "1.88"
+description = "Headless Keeper daemon for remote-browser-service (rbkeeper-unlock-v1)"
+license = "MIT"
+repository = "https://github.com/all-completed/rb-keeperd"
+publish = false
+
+[[bin]]
+name = "rbkeeperd"
+path = "src/main.rs"
+
+[dependencies]
+aes-gcm = "0.10"
+base64 = "0.22"
+data-encoding = "2"
+ed25519-dalek = { version = "2", features = ["zeroize"] }
+hex = "0.4"
+hpke = { version = "0.12", default-features = false, features = ["x25519", "alloc"] }
+libc = "0.2"
+log = { version = "0.4", features = ["std"] }
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+secrecy = { version = "0.10", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal", "sync"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+url = "2"
+# Not used directly: hpke pulls x25519-dalek with default features off, which drops
+# its `zeroize` feature, so hpke's X25519 PrivateKey (a StaticSecret) would not
+# wipe itself on drop. Naming it here turns the feature back on for hpke's copy.
+x25519-dalek = { version = "2", default-features = false, features = ["static_secrets", "zeroize"] }
+zeroize = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+panic = "abort"
+strip = true
+
+# PBKDF2 at 210 000 iterations takes seconds unoptimised; keep the tests fast.
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.pbkdf2]
+opt-level = 3
+[profile.dev.package.hmac]
+opt-level = 3
