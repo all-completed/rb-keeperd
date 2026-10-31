@@ -84,8 +84,11 @@ jobs:
       - name: "Smoke test: --help, enroll, pubkey, run hardening; Linux: exit 78 on plain swap"
         run: ci/smoke.sh "target/$TARGET/release/rbkeeperd"
       - name: Package
+        # Flat archive (no top-level directory), mirroring the repo paths, so DEPLOY.md's
+        # commands work from the directory it is extracted into:
+        #   mkdir rbkeeperd && tar -xzf <asset> -C rbkeeperd && cd rbkeeperd
         run: |
-          stage="dist/$ASSET"
+          stage="dist/stage"
           mkdir -p "$stage/packaging"
           install -m 0755 "target/$TARGET/release/rbkeeperd" "$stage/rbkeeperd"
           install -m 0644 README.md DEPLOY.md SECURITY.md LICENSE "$stage/"
@@ -93,13 +96,16 @@ jobs:
             mkdir -p "$stage/packaging/sysctl.d"
             install -m 0644 packaging/rbkeeperd.service "$stage/packaging/"
             install -m 0644 packaging/sysctl.d/90-rbkeeperd.conf "$stage/packaging/sysctl.d/"
-            tar -C dist --owner=0 --group=0 --numeric-owner -czf "dist/$ASSET.tar.gz" "$ASSET"
+            tar -C "$stage" --owner=0 --group=0 --numeric-owner -czf "dist/$ASSET.tar.gz" .
           else
             mkdir -p "$stage/packaging/macos"
             install -m 0644 packaging/macos/com.allcompleted.rbkeeperd.plist "$stage/packaging/macos/"
-            COPYFILE_DISABLE=1 tar -C dist --uid 0 --gid 0 --no-mac-metadata -czf "dist/$ASSET.tar.gz" "$ASSET"
+            COPYFILE_DISABLE=1 tar -C "$stage" --uid 0 --gid 0 --no-mac-metadata -czf "dist/$ASSET.tar.gz" .
           fi
           tar -tzvf "dist/$ASSET.tar.gz"
+          check="$(mktemp -d)"
+          tar -xzf "dist/$ASSET.tar.gz" -C "$check"
+          [ -x "$check/rbkeeperd" ] || { echo "archive is not flat: no ./rbkeeperd"; exit 1; }
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.asset }}
@@ -140,7 +146,20 @@ jobs:
         working-directory: dist
         run: |
           cosign sign-blob --yes --bundle SHA256SUMS.sigstore.json SHA256SUMS
+          # cosign v3 writes only the bundle; the detached signature (base64) and the
+          # Fulcio certificate (PEM) the Keeper download page verifies come out of it.
+          jq -er '.messageSignature.signature' SHA256SUMS.sigstore.json > SHA256SUMS.sig
+          {
+            echo '-----BEGIN CERTIFICATE-----'
+            jq -er '.verificationMaterial.certificate.rawBytes' SHA256SUMS.sigstore.json | fold -w 64
+            echo '-----END CERTIFICATE-----'
+          } > SHA256SUMS.pem
+          # Both documented forms must verify against this exact workflow and tag.
           cosign verify-blob --bundle SHA256SUMS.sigstore.json \
+            --certificate-identity "$SIGNER" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            SHA256SUMS
+          cosign verify-blob --signature SHA256SUMS.sig --certificate SHA256SUMS.pem \
             --certificate-identity "$SIGNER" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             SHA256SUMS
@@ -154,7 +173,8 @@ jobs:
         run: |
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
             --title "rbkeeperd $TAG" --generate-notes \
-            dist/rbkeeperd-*.tar.gz dist/SHA256SUMS dist/SHA256SUMS.sigstore.json
+            dist/rbkeeperd-*.tar.gz dist/SHA256SUMS dist/SHA256SUMS.sig dist/SHA256SUMS.pem \
+            dist/SHA256SUMS.sigstore.json
       - name: Check the published release
         working-directory: dist
         run: |
@@ -164,7 +184,7 @@ jobs:
           done
           # Anonymous download URLs the Keeper download page links (200, or 302 to the asset).
           for f in rbkeeperd-linux-x86_64.tar.gz rbkeeperd-linux-arm64.tar.gz rbkeeperd-macos-arm64.tar.gz \
-                   rbkeeperd-macos-x64.tar.gz SHA256SUMS SHA256SUMS.sigstore.json; do
+                   rbkeeperd-macos-x64.tar.gz SHA256SUMS SHA256SUMS.sig SHA256SUMS.pem SHA256SUMS.sigstore.json; do
             url="https://github.com/$GITHUB_REPOSITORY/releases/latest/download/$f"
             code="$(curl -sS -o /dev/null -w '%{http_code}' "$url")"
             echo "$code $url"

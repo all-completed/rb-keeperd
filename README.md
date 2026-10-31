@@ -22,9 +22,9 @@ It runs on Linux (x86_64, arm64) and macOS (Apple Silicon, Intel; weaker guarant
 DEPLOY.md, "Install from a release":
 
 ```sh
-cosign verify-blob --bundle SHA256SUMS.sigstore.json \
+cosign verify-blob SHA256SUMS --signature SHA256SUMS.sig --certificate SHA256SUMS.pem \
   --certificate-identity-regexp '^https://github\.com/all-completed/rb-keeperd/\.github/workflows/release\.yml@refs/tags/v' \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com SHA256SUMS
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
 grep " rbkeeperd-linux-x86_64.tar.gz\$" SHA256SUMS | sha256sum -c -
 gh attestation verify rbkeeperd-linux-x86_64.tar.gz -R all-completed/rb-keeperd
 ```
@@ -144,7 +144,8 @@ one per target (no cross toolchain, no container image):
   reads it);
 - every action pinned by commit SHA; Dependabot (`.github/dependabot.yml`) bumps them
   and the cargo dependencies;
-- `SHA256SUMS` signed keyless with cosign (`SHA256SUMS.sigstore.json`), a
+- `SHA256SUMS` signed keyless with cosign (`SHA256SUMS.sig` + `SHA256SUMS.pem`, and the
+  same signature as a Sigstore bundle, `SHA256SUMS.sigstore.json`), a
   `actions/attest-build-provenance` attestation for every archive, and the release
   published with the workflow's own `GITHUB_TOKEN`.
 

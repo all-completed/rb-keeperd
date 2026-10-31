@@ -48,23 +48,26 @@ Each `v*` tag publishes four archives on
 | macOS Apple Silicon | `rbkeeperd-macos-arm64.tar.gz` |
 | macOS Intel | `rbkeeperd-macos-x64.tar.gz` |
 
-Each archive holds `rbkeeperd`, README, DEPLOY, SECURITY, LICENSE and `packaging/`
-(the systemd unit and sysctl file on Linux, the launchd plist on macOS). `SHA256SUMS`
-lists their hashes; `SHA256SUMS.sigstore.json` is its keyless cosign signature (a Sigstore
-bundle: signature, certificate and transparency-log entry).
+Each archive is flat (no top-level directory) and holds `rbkeeperd`, README, DEPLOY,
+SECURITY, LICENSE and `packaging/` (the systemd unit and sysctl file on Linux, the
+launchd plist on macOS), at the same paths as in this repo. `SHA256SUMS` lists their
+hashes; `SHA256SUMS.sig` + `SHA256SUMS.pem` are its keyless cosign signature and signing
+certificate. `SHA256SUMS.sigstore.json` carries the same signature as a Sigstore bundle
+(signature, certificate and transparency-log entry), which also verifies offline.
 
 Download and verify, as a normal user:
 
 ```sh
 asset=rbkeeperd-linux-x86_64.tar.gz      # or rbkeeperd-linux-arm64 / -macos-arm64 / -macos-x64 .tar.gz
 base=https://github.com/all-completed/rb-keeperd/releases/latest/download
-curl -fL -O "$base/$asset" -O "$base/SHA256SUMS" -O "$base/SHA256SUMS.sigstore.json"
+curl -fL -O "$base/$asset" -O "$base/SHA256SUMS" -O "$base/SHA256SUMS.sig" -O "$base/SHA256SUMS.pem"
 
-# 1. SHA256SUMS was signed by this repo's release workflow, on a v* tag (cosign v3).
-cosign verify-blob --bundle SHA256SUMS.sigstore.json \
+# 1. SHA256SUMS was signed by this repo's release workflow, on a v* tag (cosign).
+cosign verify-blob SHA256SUMS --signature SHA256SUMS.sig --certificate SHA256SUMS.pem \
   --certificate-identity-regexp '^https://github\.com/all-completed/rb-keeperd/\.github/workflows/release\.yml@refs/tags/v' \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  SHA256SUMS                                                    # → Verified OK
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com   # → Verified OK
+#    (offline: download SHA256SUMS.sigstore.json and pass --bundle SHA256SUMS.sigstore.json
+#    instead of --signature/--certificate.)
 # 2. The archive is the one SHA256SUMS lists.
 grep " $asset\$" SHA256SUMS | sha256sum -c -                   # macOS: shasum -a 256 -c -  → OK
 # 3. GitHub's build provenance: built from this repo by that workflow.
@@ -75,7 +78,7 @@ gh attestation verify "$asset" -R all-completed/rb-keeperd \
 Stop if any of the three fails. Then install (Linux):
 
 ```sh
-tar -xzf "$asset" && cd "${asset%.tar.gz}"
+mkdir rbkeeperd && tar -xzf "$asset" -C rbkeeperd && cd rbkeeperd
 sudo install -o root -g root -m 0755 rbkeeperd /usr/local/bin/rbkeeperd
 ```
 
@@ -320,7 +323,7 @@ before you enroll a Mac. Run everything as an admin user; `sudo` is root.
    verification above passed:
 
    ```sh
-   tar -xzf "$asset" && cd "${asset%.tar.gz}"
+   mkdir rbkeeperd && tar -xzf "$asset" -C rbkeeperd && cd rbkeeperd
    xattr -d com.apple.quarantine rbkeeperd   # "No such xattr" is fine (curl sets no flag)
    ```
 
