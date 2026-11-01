@@ -31,8 +31,8 @@ jobs:
         include:
           - { asset: rbkeeperd-linux-x86_64, target: x86_64-unknown-linux-musl, os: ubuntu-24.04, file: "ELF 64-bit LSB .*x86-64" }
           - { asset: rbkeeperd-linux-arm64, target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm, file: "ELF 64-bit LSB .*ARM aarch64" }
-          - { asset: rbkeeperd-macos-arm64, target: aarch64-apple-darwin, os: macos-15, file: "Mach-O 64-bit executable arm64" }
-          - { asset: rbkeeperd-macos-x64, target: x86_64-apple-darwin, os: macos-15-intel, file: "Mach-O 64-bit executable x86_64" }
+          - { asset: rbkeeperd-macos-arm64, target: aarch64-apple-darwin, os: macos-15, file: "Mach-O 64-bit (executable arm64|arm64 executable)" }
+          - { asset: rbkeeperd-macos-x64, target: x86_64-apple-darwin, os: macos-15-intel, file: "Mach-O 64-bit (executable x86_64|x86_64 executable)" }
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -74,12 +74,21 @@ jobs:
           codesign --force --sign - "target/$TARGET/release/rbkeeperd"
           codesign --verify --verbose "target/$TARGET/release/rbkeeperd"
       - name: Architecture and linkage
+        # file(1) wording differs by build: the musl binary is "statically linked" on
+        # aarch64 but a "pie executable ... static-pie linked" on x86_64, and Apple's
+        # file prints "Mach-O 64-bit executable arm64" where upstream libmagic prints
+        # "Mach-O 64-bit arm64 executable". The ELF headers decide linkage on their own.
         run: |
-          out="$(file -b "target/$TARGET/release/rbkeeperd")"
+          bin="target/$TARGET/release/rbkeeperd"
+          out="$(file -b "$bin")"
           echo "$out"
           echo "$out" | grep -Eq "$FILE_PATTERN" || { echo "wrong architecture"; exit 1; }
           if [ "$RUNNER_OS" = Linux ]; then
-            echo "$out" | grep -Eq 'static(-pie)? linked' || { echo "not statically linked"; exit 1; }
+            echo "$out" | grep -Eq 'statically linked|static-pie linked' || { echo "not statically linked"; exit 1; }
+            phdrs="$(readelf -lW "$bin")"
+            dyn="$(readelf -dW "$bin")"
+            if echo "$phdrs" | grep -q INTERP; then echo "has a program interpreter (PT_INTERP)"; exit 1; fi
+            if echo "$dyn" | grep -q '(NEEDED)'; then echo "needs a shared library (DT_NEEDED)"; exit 1; fi
           fi
       - name: "Smoke test: --help, enroll, pubkey, run hardening; Linux: exit 78 on plain swap"
         run: ci/smoke.sh "target/$TARGET/release/rbkeeperd"
