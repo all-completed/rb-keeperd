@@ -225,7 +225,7 @@ At start the daemon logs:
 
 ```
 hardening: RLIMIT_CORE=0, PR_SET_DUMPABLE 0, mlockall(MCL_CURRENT|MCL_FUTURE); swap is off or encrypted
-rb-keeperd 0.2.0 for hk1_… at https://rb.all-completed.com/
+rb-keeperd 0.2.1 for hk1_… at https://rb.all-completed.com/
 unlock: hk1_… on boot <boot id> — comparison code ABCD-1234 (check it on the Keeper before approving)
 unlock: request req_… is waiting for a Keeper
 ```
