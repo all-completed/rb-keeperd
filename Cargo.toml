@@ -36,7 +36,7 @@ url = "2"
 # Not used directly: hpke pulls x25519-dalek with default features off, which drops
 # its `zeroize` feature, so hpke's X25519 PrivateKey (a StaticSecret) would not
 # wipe itself on drop. Naming it here turns the feature back on for hpke's copy.
-x25519-dalek = { version = "2", default-features = false, features = ["static_secrets", "zeroize"] }
+x25519-dalek = { version = "3", default-features = false, features = ["static_secrets", "zeroize"] }
 zeroize = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
