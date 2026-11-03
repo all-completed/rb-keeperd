@@ -22,7 +22,7 @@ hex = "0.4"
 hpke = { version = "0.12", default-features = false, features = ["x25519", "alloc"] }
 libc = "0.2"
 log = { version = "0.4", features = ["std"] }
-pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+pbkdf2 = { version = "0.13", default-features = false, features = ["hmac"] }
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 secrecy = { version = "0.10", features = ["serde"] }
