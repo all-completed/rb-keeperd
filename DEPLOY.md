@@ -9,7 +9,10 @@ Run the steps in order. Each step ends with a check; stop if a check fails.
 
 ## 0. What root can still do (read first)
 
-rb-keeperd holds the vault password and the device token in RAM only:
+rb-keeperd holds the vault password, the device token and the decrypted vault in RAM
+only. The vault includes **saved payment cards** (number, expiry, CVV, holder name and
+billing address), which the daemon uses to answer card checkouts on sites a person
+approved a card for:
 
 - the pages are `mlockall`ed;
 - the process is not dumpable and there are no core files;
@@ -23,8 +26,8 @@ rb-keeperd holds the vault password and the device token in RAM only:
   re-asks for approval, and this boot's comparison code looks like any other's;
 - use the device token while it is live.
 
-So whoever has root on the host can get the vault for as long as the daemon is
-unlocked. Only enroll the host if you accept that. The control you keep is the
+So whoever has root on the host can get the vault, cards included, for as long as the
+daemon is unlocked. Only enroll the host if you accept that. The control you keep is the
 approval itself: an unlock happens only after **you** check the comparison code and
 press Approve on a desktop Keeper. An unexpected unlock request means the machine
 rebooted, or something is pretending to be the daemon. Deny it.
@@ -244,7 +247,7 @@ After approval the log shows:
 ```
 unlock: approved (vault format …)
 keeper: connected as hk1_… (<host>)
-vault: version N with M fields
+vault: version N with M fields and K cards
 ```
 
 ## 7. End-to-end check
@@ -267,6 +270,14 @@ headlessly. A one-time code, or any field without auto, is always left for a per
    - no field value appears in that log, or anywhere else in the journal.
 
 A request the daemon cannot serve logs `— left for a person` and stays open.
+
+**Cards (optional).** On a desktop Keeper, approve a test card for the test site and
+make sure auto-fill for cards is on. With every desktop Keeper quit, request a fill of
+the site's card fields (all `card-*`). Expect `— served N card field(s)` in the journal,
+and no card value in it. A site the card is not approved for, a card without a CVV
+when the CVV is asked for, or auto-fill off logs `— left for a person`. After you
+change the default card on a desktop or phone, the next fill uses the new default
+without a restart.
 
 ## Operating
 
