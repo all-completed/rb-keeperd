@@ -13,6 +13,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
+use crate::cards::{Card, CardsMeta};
+
 pub const FORMAT_SHA256_V2: &str = "aesgcm-sha256-v2";
 pub const FORMAT_PBKDF2_V2: &str = "aesgcm-pbkdf2-v2";
 pub const FORMAT_V1: &str = "aesgcm-sha256-v1";
@@ -157,14 +159,17 @@ impl fmt::Debug for Entry {
     }
 }
 
-/// The decrypted vault, held in RAM only. Only live string-valued `fields` are kept;
-/// cards and everything else in the blob are dropped (a headless Keeper fills fields
-/// only).
+/// The decrypted vault, held in RAM only. Kept: live string-valued `fields`, live
+/// `cards` (in the desktop's key order) and `cardsMeta`; everything else in the blob
+/// (pins, unknown collections) is scrubbed and dropped. Replacing or dropping a
+/// `Vault` zeroizes every value it held.
 #[derive(Default)]
 pub struct Vault {
     pub version: u64,
     pub format: Option<Format>,
     pub fields: HashMap<String, Entry>,
+    pub cards: Vec<Card>,
+    pub cards_meta: CardsMeta,
 }
 
 impl fmt::Debug for Vault {
@@ -173,13 +178,16 @@ impl fmt::Debug for Vault {
             .field("version", &self.version)
             .field("format", &self.format)
             .field("fields", &self.fields.len())
+            .field("cards", &self.cards.len())
+            .field("cards_meta", &self.cards_meta)
             .finish()
     }
 }
 
 impl Vault {
     /// Build from the decrypted blob JSON. Tombstones (`deleted`) and non-object or
-    /// non-string entries are skipped, as the desktop's `isLive` / `getSaved` do.
+    /// non-string entries are skipped, as the desktop's `isLive` / `getSaved` do;
+    /// cards follow `crate::cards::from_blob`.
     pub fn from_plaintext(version: u64, format: Format, plaintext: &[u8]) -> Result<Self, VaultError> {
         let blob: Zeroizing<String> = Zeroizing::new(
             String::from_utf8(plaintext.to_vec()).map_err(|_| VaultError::Corrupt("plaintext is not UTF-8"))?,
@@ -203,7 +211,8 @@ impl Vault {
             }
         }
         scrub(&mut v);
-        Ok(Vault { version, format: Some(format), fields })
+        let (cards, cards_meta) = crate::cards::from_blob(&blob);
+        Ok(Vault { version, format: Some(format), fields, cards, cards_meta })
     }
 
     pub fn len(&self) -> usize {
@@ -216,7 +225,7 @@ impl Vault {
 }
 
 /// JS truthiness for the JSON values a blob may carry.
-fn truthy(v: &Value) -> bool {
+pub(crate) fn truthy(v: &Value) -> bool {
     match v {
         Value::Null => false,
         Value::Bool(b) => *b,
@@ -226,8 +235,8 @@ fn truthy(v: &Value) -> bool {
     }
 }
 
-/// Overwrite every string left in a parsed blob (cards etc.) before it drops.
-fn scrub(v: &mut Value) {
+/// Overwrite every string left in a parsed blob before it drops.
+pub(crate) fn scrub(v: &mut Value) {
     use zeroize::Zeroize;
     match v {
         Value::String(s) => s.zeroize(),
@@ -293,7 +302,7 @@ pub async fn pull(
         .await
         .map_err(|e| VaultError::Http(e.without_url().to_string()))?;
     match res.status().as_u16() {
-        404 => return Ok(Vault { version: 0, format: Some(key_format), fields: HashMap::new() }),
+        404 => return Ok(Vault { version: 0, format: Some(key_format), ..Default::default() }),
         401 => return Err(VaultError::Unauthorized),
         s if !(200..300).contains(&s) => return Err(VaultError::Http(format!("status {}", s))),
         _ => {}
@@ -428,7 +437,8 @@ mod tests {
         let (ct, _) = fixture(Format::Sha256V2);
         let pt = decrypt(Format::Sha256V2, &pw("fixture-password"), &ct, None).unwrap();
         let v = Vault::from_plaintext(1, Format::Sha256V2, &pt).unwrap();
-        let dbg = format!("{:?} {:?}", v, v.fields.values().collect::<Vec<_>>());
-        assert!(!dbg.contains("fixture-"), "{}", dbg);
+        assert_eq!(v.cards.len(), 1, "cards are kept too");
+        let dbg = format!("{:?} {:?} {:?}", v, v.fields.values().collect::<Vec<_>>(), v.cards);
+        assert!(!dbg.contains("fixture-") && !dbg.contains("4111"), "{}", dbg);
     }
 }

@@ -6,8 +6,8 @@
 It runs as a host service on a machine with no person in front of it (a home server,
 a NAS, a small VM). After every boot it asks a desktop Keeper for approval to unlock.
 Once approved it holds the vault in RAM and silently answers the auto-fills a person
-already marked **auto**. That way an agent can log into a session while every desktop
-Keeper is closed.
+already marked **auto**, and card checkouts on sites a person approved a saved card for.
+That way an agent can log into a session, or pay, while every desktop Keeper is closed.
 
 The protocol is **rbkeeper-unlock-v1**, shared with the desktop Keeper
 ([all-completed/remote-browser-keeper](https://github.com/all-completed/remote-browser-keeper),
@@ -80,8 +80,29 @@ Exit codes:
    - It answers a `fill_request` only when every requested field has a vault entry
      (`session|host|selector`, with `host` = hostname lowercased, one `www.` stripped)
      marked auto, and no requested field is a one-time `code`.
+   - **Cards** follow the desktop's unattended card fill (`src/cards.js`) exactly. A
+     request whose every field is a `card-*` kind is answered from the vault's `cards`
+     when all of these hold:
+     - auto-fill is on (`cardsMeta.autofill` is not `false`);
+     - a live card (not a tombstone) is approved for the request host in its `domains`
+       (`*`, `*.example.com` or `example.com`, which also covers subdomains). The
+       default card (`cardsMeta.default`) is tried first, then the others in order;
+     - that card has a value for every requested field. Holder, number, expiry and
+       CVV must not be empty, only the billing address may be. A card without a CVV
+       can't answer a request that asks for one, because nobody is there to type it.
+       Expiry and billing follow the field's `format` as on the desktop (`MM/YY` by
+       default; `ZIP,COUNTRY`-style billing tokens). One difference: an expiry whose
+       month or year is missing on the card is not answered, where the desktop would
+       fill `00` or leave the year out.
+
+     If the first approved card can't answer, no other card is tried. If no card is
+     approved for the host, nothing is guessed: the field rule above still applies,
+     and otherwise the request stays open for a person. A changed default or a newly
+     approved site takes effect on the next vault pull (`vault_updated` or the 10-min
+     poll), with no restart.
    - Anything else gets no answer, so the request stays open for a person.
-   - It never cancels or denies, and it never writes to the vault.
+   - It never cancels or denies, and it never writes to the vault, so it can't clobber
+     cards or settings another Keeper changed.
 5. **Locking:**
    - A revoked token (401 or 1008), a vault key mismatch, or a re-keyed vault wipes the
      token, password and vault, and it asks for a new unlock.
@@ -95,6 +116,13 @@ A `secret_request`, like a one-time code, always needs a person, so the headless
 Keeper never answers one.
 
 ## Limits (read before trusting it)
+
+- **Card data is held in RAM on the headless host.** Once unlocked, the daemon holds
+  every live saved card (number, expiry, CVV, holder name and billing address) for as
+  long as it is unlocked, not just the login fields. Anyone who can read the daemon's
+  memory (below) gets them. If that host should never pay unattended, turn card
+  auto-fill off on a desktop Keeper, or approve the cards for no site. The values are `SecretString`s with a
+  `[REDACTED]` `Debug`; they are wiped on lock, reload and exit, and never logged.
 
 - **Root on the host can read the daemon's memory**, for example with a kernel module or
   by replacing the binary before a reboot. `ptrace_scope=3` and the non-dumpable flag
@@ -119,7 +147,7 @@ On a Mac the daemon does what macOS allows, which is less than Linux:
 
 - **No `mlockall`.** macOS has none. Only the buffers this crate owns are `mlock`ed: the
   unlock plaintext, the device token, the vault password, the vault master key, the
-  decrypted vault and its values. Copies inside dependencies (`tungstenite`,
+  decrypted vault and its values (fields and cards). Copies inside dependencies (`tungstenite`,
   `reqwest`/`hyper`, `rustls`, `serde_json`) and the identity key **can be paged out**.
   They can land only in encrypted swap, since the daemon refuses to run otherwise. A
   failed `mlock` is logged once and is not fatal.

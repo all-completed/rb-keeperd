@@ -40,6 +40,19 @@ const USER_VALUE: &str = "fixture-user-value-Mm1";
 const PASS_VALUE: &str = "fixture-pass-value-Pp2";
 const MEMO_VALUE: &str = "fixture-memo-value-Nn3";
 const OTP_VALUE: &str = "fixture-otp-value-Oo4";
+// Card fixtures, in the vault blob below. The 19-digit number and the CVV are markers
+// for the log check as well.
+const VISA_HOLDER: &str = "VISA HOLDER fixture-card-holder-Hh5";
+const VISA_NUMBER: &str = "4000123498765432107";
+const VISA_CVV: &str = "fixture-cvv-visa-Cc6";
+const VISA_STREET: &str = "fixture-street-Bb7";
+const VISA_ZIP: &str = "fixture-zip-Zz8";
+const AMEX_NUMBER: &str = "340000000000009";
+const AMEX_CVV: &str = "fixture-cvv-amex-Dd1";
+const NOCVV_NUMBER: &str = "4000056655665556";
+const OLD_NUMBER: &str = "4000777788889999111";
+const CARD_MARKS: [&str; 9] =
+    [VISA_HOLDER, VISA_NUMBER, VISA_CVV, VISA_STREET, VISA_ZIP, AMEX_NUMBER, AMEX_CVV, NOCVV_NUMBER, OLD_NUMBER];
 const BOOT: &str = "6f1d2c3b-0000-4000-8000-00000000b007";
 
 // An upper bound for things that must happen; a pass never waits it out. Generous
@@ -101,6 +114,7 @@ struct VaultState {
     body: String,
     hits: usize,
     auth: Vec<String>,
+    methods: Vec<String>,
 }
 
 struct Mock {
@@ -139,6 +153,7 @@ async fn serve_vault(mut stream: TcpStream, head: String, state: Arc<Mutex<Vault
     let (status, body) = {
         let mut s = state.lock().unwrap();
         s.hits += 1;
+        s.methods.push(head.split_whitespace().next().unwrap_or("").to_string());
         s.auth.push(header(&head, "authorization").unwrap_or("").to_string());
         (s.status, s.body.clone())
     };
@@ -157,7 +172,7 @@ async fn start_mock(vault_body: String) -> Mock {
     let port = listener.local_addr().unwrap().port();
     let (htx, hrx) = mpsc::unbounded_channel();
     let (ktx, krx) = mpsc::unbounded_channel();
-    let vault = Arc::new(Mutex::new(VaultState { status: 200, body: vault_body, hits: 0, auth: vec![] }));
+    let vault = Arc::new(Mutex::new(VaultState { status: 200, body: vault_body, hits: 0, auth: vec![], methods: vec![] }));
     let keeper_status = Arc::new(Mutex::new(101u16));
     let (v, ks) = (vault.clone(), keeper_status.clone());
     tokio::spawn(async move {
@@ -225,6 +240,65 @@ fn blob() -> Vec<u8> {
 fn vault_body(format: Format, password: &str, version: u64) -> String {
     let (ct, secret_id) = encrypt_for_tests(format, password, &[7u8; 16], &[9u8; 12], &blob());
     json!({"version": version, "secret_id": secret_id, "format": format.as_str(), "ciphertext": ct}).to_string()
+}
+
+/// A blob with cards, as raw text: `json!` would sort the keys, and card order matters.
+/// visa: `*.shop.example`; amex: `shop.example` and `travel.example`; old: a tombstone
+/// that still carries data and `*`; nocvv: `nocvv.example`, no CVV.
+fn card_blob(meta: &str) -> Vec<u8> {
+    let cards = format!(
+        r#"{{
+        "visa": {{"holder": "{VISA_HOLDER}", "number": "4000 1234 9876 5432 107", "cvv": "{VISA_CVV}",
+                  "exp_month": "4", "exp_year": "2029", "domains": ["*.shop.example"], "updated_at": "2026-11-01T00:00:00Z",
+                  "billing": {{"address_line1": "{VISA_STREET}", "address_line2": "", "city": "Town", "zip": "{VISA_ZIP}", "state": "", "country": "US"}}}},
+        "amex": {{"holder": "AMEX HOLDER", "number": "3400 000000 00009", "cvv": "{AMEX_CVV}",
+                  "exp_month": 12, "exp_year": 30, "domains": ["shop.example", "travel.example"]}},
+        "old":  {{"deleted": true, "updated_at": "2026-11-02T00:00:00Z", "holder": "OLD", "number": "{OLD_NUMBER}", "cvv": "999",
+                  "exp_month": "1", "exp_year": "2030", "domains": ["*"]}},
+        "nocvv": {{"holder": "NO CVV", "number": "{NOCVV_NUMBER}", "exp_month": "1", "exp_year": "2031", "domains": ["nocvv.example"]}}
+    }}"#
+    );
+    let fields = json!({"bank|shop.example|#user": {"value": USER_VALUE, "auto": true}});
+    format!(r#"{{"schema": 1, "fields": {}, "cards": {}, "cardsMeta": {}}}"#, fields, cards, meta).into_bytes()
+}
+
+fn card_vault_body(meta: &str, version: u64) -> String {
+    let (ct, secret_id) = encrypt_for_tests(Format::Sha256V2, PASSWORD, &[7u8; 16], &[9u8; 12], &card_blob(meta));
+    json!({"version": version, "secret_id": secret_id, "format": "aesgcm-sha256-v2", "ciphertext": ct}).to_string()
+}
+
+const DEFAULT_VISA: &str = r#"{"autofill": true, "default": "visa", "updated_at": "2026-11-01T00:00:00Z"}"#;
+
+/// A card-only checkout on `url`.
+fn card_request(rid: &str, url: &str, fields: Value) -> Value {
+    json!({"type": "fill_request", "request_id": rid, "session_id": "bank", "url": url,
+           "message": "pay", "screenshot": "", "fields": fields})
+}
+
+fn checkout_fields() -> Value {
+    json!([{"selector": "#name", "field": "card-holder-name", "label": "Name on card"},
+           {"selector": "#cc", "field": "card-number", "label": "Card number"},
+           {"selector": "#exp", "field": "card-exp", "label": "Expiry", "format": "MM / YYYY"},
+           {"selector": "#cvc", "field": "card-cvv", "label": "CVC"},
+           {"selector": "#zip", "field": "card-billing-address", "label": "ZIP", "format": "ZIP,COUNTRY"}])
+}
+
+/// Unlock against a card vault, then send each `(rid, url, fields)` and return the
+/// answers (None = silence). Asserts no card value or other secret reached the log.
+async fn card_answers(meta: &str, reqs: Vec<(&str, &str, Value)>) -> Vec<Option<Value>> {
+    capture_logs();
+    let mut m = start_mock(card_vault_body(meta, 1)).await;
+    let d = spawn_daemon(m.port);
+    let (_first, _info, _auth, mut ws) = unlocked(&mut m, Format::Sha256V2).await;
+    let mut out = Vec::new();
+    for (rid, url, fields) in reqs {
+        send(&mut ws, card_request(rid, url, fields)).await;
+        out.push(recv_json(&mut ws, QUIET).await);
+    }
+    d.abort();
+    assert!(m.vault.lock().unwrap().methods.iter().all(|m| m == "GET"), "read-only on the vault");
+    assert_no_secret_logged(&CARD_MARKS);
+    out
 }
 
 fn payload(format: Format) -> Vec<u8> {
@@ -686,4 +760,102 @@ async fn transient_failures_do_not_lock() {
     assert!(timeout(QUIET, m.headless.recv()).await.is_err(), "never went back to unlock");
     d.abort();
     assert_no_secret_logged(&[]);
+}
+
+// ───────────────────────────── cards ─────────────────────────────
+
+#[tokio::test]
+async fn card_only_requests_are_answered_from_the_default_card() {
+    // amex is approved for shop.example too; the default wins.
+    let got = card_answers(DEFAULT_VISA, vec![("c1", "https://www.Shop.example/checkout", checkout_fields())]).await;
+    assert_eq!(
+        got[0],
+        Some(json!({"type": "fill_response", "request_id": "c1", "values": [
+            {"selector": "#name", "value": VISA_HOLDER},
+            {"selector": "#cc", "value": VISA_NUMBER},
+            {"selector": "#exp", "value": "04 / 2029"},
+            {"selector": "#cvc", "value": VISA_CVV},
+            {"selector": "#zip", "value": format!("{}, US", VISA_ZIP)}]}))
+    );
+    assert!(log_text().contains("served 5 card field(s)"));
+}
+
+#[tokio::test]
+async fn a_card_not_approved_for_the_host_falls_back_to_the_next_approved_one() {
+    let fields = json!([{"selector": "#cc", "field": "card-number"}, {"selector": "#exp", "field": "card-exp"},
+                        {"selector": "#cvc", "field": "card-cvv"}]);
+    let got = card_answers(DEFAULT_VISA, vec![
+        ("c1", "https://travel.example/pay", fields.clone()),
+        ("c2", "https://nowhere.example/pay", fields),
+    ])
+    .await;
+    assert_eq!(got[0], Some(json!({"type": "fill_response", "request_id": "c1", "values": [
+        {"selector": "#cc", "value": AMEX_NUMBER}, {"selector": "#exp", "value": "12/30"},
+        {"selector": "#cvc", "value": AMEX_CVV}]})), "visa (default) is not approved for travel.example");
+    assert_eq!(got[1], None, "no card approved for the host: never guessed");
+}
+
+#[tokio::test]
+async fn a_tombstoned_card_is_ignored() {
+    // "old" is deleted but still says "*" and holds data; as the default it must not count.
+    let meta = r#"{"autofill": true, "default": "old"}"#;
+    let cc = json!([{"selector": "#cc", "field": "card-number"}]);
+    let got = card_answers(meta, vec![
+        ("c1", "https://elsewhere.example/pay", cc.clone()),
+        ("c2", "https://shop.example/pay", cc),
+    ])
+    .await;
+    assert_eq!(got[0], None, "only the tombstone matched");
+    assert_eq!(got[1].as_ref().unwrap()["values"][0]["value"], VISA_NUMBER, "a tombstoned default: plain order");
+}
+
+#[tokio::test]
+async fn autofill_off_fills_no_card() {
+    let meta = r#"{"autofill": false, "default": "visa"}"#;
+    let got = card_answers(meta, vec![
+        ("c1", "https://shop.example/pay", checkout_fields()),
+        // Fields are unaffected by the card switch.
+        ("f1", "https://shop.example/login", json!([{"selector": "#user", "field": "username"}])),
+    ])
+    .await;
+    assert_eq!(got[0], None);
+    assert_eq!(got[1].as_ref().unwrap()["values"][0]["value"], USER_VALUE);
+}
+
+#[tokio::test]
+async fn a_missing_cvv_means_no_fill() {
+    let got = card_answers(DEFAULT_VISA, vec![
+        ("c1", "https://nocvv.example/pay", json!([{"selector": "#cc", "field": "card-number"}, {"selector": "#cvc", "field": "card-cvv"}])),
+        ("c2", "https://nocvv.example/pay", json!([{"selector": "#cc", "field": "card-number"}, {"selector": "#exp", "field": "card-exp", "format": "MMYY"}])),
+        // A request mixing a card field with any other kind is not a card request.
+        ("c3", "https://shop.example/pay", json!([{"selector": "#cc", "field": "card-number"}, {"selector": "#user", "field": "username"}])),
+    ])
+    .await;
+    assert_eq!(got[0], None, "nobody is here to type the CVV; never an empty one");
+    assert_eq!(got[1], Some(json!({"type": "fill_response", "request_id": "c2", "values": [
+        {"selector": "#cc", "value": NOCVV_NUMBER}, {"selector": "#exp", "value": "0131"}]})), "the CVV was not asked for");
+    assert_eq!(got[2], None);
+}
+
+#[tokio::test]
+async fn a_changed_default_applies_after_the_next_pull() {
+    capture_logs();
+    let mut m = start_mock(card_vault_body(DEFAULT_VISA, 1)).await;
+    let d = spawn_daemon(m.port);
+    let (_first, _info, _auth, mut ws) = unlocked(&mut m, Format::Sha256V2).await;
+    let cc = json!([{"selector": "#cc", "field": "card-number"}]);
+    send(&mut ws, card_request("c1", "https://shop.example/pay", cc.clone())).await;
+    assert_eq!(recv_json(&mut ws, WAIT).await.unwrap()["values"][0]["value"], VISA_NUMBER);
+
+    // Another Keeper makes amex the default and pushes version 2.
+    m.vault.lock().unwrap().body = card_vault_body(r#"{"autofill": true, "default": "amex", "updated_at": "2026-11-03T00:00:00Z"}"#, 2);
+    send(&mut ws, json!({"type": "vault_updated", "version": 2})).await;
+    send(&mut ws, card_request("c2", "https://shop.example/pay", cc)).await;
+    assert_eq!(recv_json(&mut ws, WAIT).await.unwrap()["values"][0]["value"], AMEX_NUMBER);
+    d.abort();
+    let v = m.vault.lock().unwrap();
+    assert_eq!(v.hits, 2, "one pull at unlock, one on vault_updated; no restart");
+    assert!(v.methods.iter().all(|m| m == "GET"), "never a PUT");
+    drop(v);
+    assert_no_secret_logged(&CARD_MARKS);
 }

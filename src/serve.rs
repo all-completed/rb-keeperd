@@ -6,10 +6,15 @@
 //! entry marked auto and none is a one-time code. Anything else gets no answer at
 //! all, so the request stays open for a person on a desktop Keeper. The daemon has
 //! no prompt and never cancels or denies.
+//!
+//! A card-only request (every field a `card-*` kind) is tried first against the
+//! vault's cards, as the desktop's `tryAutofillCard` is (`decide_card_fill`); when no
+//! card answers it, the field rule above still applies.
 
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::Value;
 
+use crate::cards;
 use crate::vault::Vault;
 
 /// `new URL(url).hostname.toLowerCase().replace(/^www\./, "")`, or "" when the URL
@@ -68,6 +73,22 @@ pub fn decide_fill(vault: &Vault, req: &Value) -> Option<Vec<Fill>> {
         out.push(Fill { selector: Value::String(selector.to_string()), value: entry.value.clone() });
     }
     Some(out)
+}
+
+/// The desktop's `tryAutofillCard` for one `fill_request` frame: every field is a
+/// `card-*` kind, auto-fill is on (`cardsMeta.autofill !== false`), a card is
+/// approved for the request host (default card first), and that card has a
+/// non-empty value for every field but the billing address. Otherwise `None`: no
+/// other card is tried and nothing is guessed.
+pub fn decide_card_fill(vault: &Vault, req: &Value) -> Option<Vec<Fill>> {
+    let fields = req.get("fields")?.as_array()?;
+    if !cards::is_card_only_request(fields) || !vault.cards_meta.autofill {
+        return None;
+    }
+    let host = host_from_url(req.get("url").and_then(Value::as_str).unwrap_or(""));
+    let card = cards::card_for_host(&vault.cards, &vault.cards_meta, &host)?;
+    let values = cards::build_card_values(fields, card)?;
+    Some(values.into_iter().map(|(selector, value)| Fill { selector: Value::String(selector.to_string()), value }).collect())
 }
 
 /// The `fill_response` frame text. The caller zeroizes it after sending.

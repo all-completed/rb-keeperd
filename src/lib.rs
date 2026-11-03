@@ -1,6 +1,7 @@
 //! rb-keeperd: a headless, RAM-only Keeper for remote-browser-service
 //! (rbkeeper-unlock-v1, part 3).
 
+pub mod cards;
 pub mod daemon;
 pub mod hardening;
 pub mod host;

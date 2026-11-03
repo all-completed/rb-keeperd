@@ -9,8 +9,8 @@
 //! ```
 //!
 //! Secrets held while unlocked: the device token and the vault password (in the
-//! `UnlockPayload`, `SecretString`s) and the decrypted vault (`Vault`, also
-//! `SecretString`s). Locking drops them, which zeroizes them; so does a SIGTERM,
+//! `UnlockPayload`, `SecretString`s) and the decrypted vault (`Vault`: fields and
+//! cards, also `SecretString`s). Locking drops them, which zeroizes them; so does a SIGTERM,
 //! because `main` drops the whole `run` future before exiting.
 
 use std::time::Duration;
@@ -421,7 +421,7 @@ pub async fn keeper(cfg: &Config, identity: &Identity, client: &reqwest::Client,
             Some(v) => v,
             None => match pull(client, cfg, payload).await {
                 Ok(v) => {
-                    info!("vault: version {} with {} fields", v.version, v.len());
+                    info!("vault: version {} with {} fields and {} cards", v.version, v.len(), v.cards.len());
                     v
                 }
                 Err(e) if e.locks() => return Locked(e.to_string()),
@@ -476,7 +476,7 @@ fn apply_pull(vault: &mut Vault, pulled: Result<Vault, VaultError>) -> Option<St
     match pulled {
         Ok(v) => {
             if v.version != vault.version {
-                info!("vault: now version {} with {} fields", v.version, v.len());
+                info!("vault: now version {} with {} fields and {} cards", v.version, v.len(), v.cards.len());
             }
             *vault = v;
             None
@@ -578,10 +578,14 @@ async fn serve_loop(
                 let rid = frame.get("request_id").and_then(Value::as_str).unwrap_or("");
                 let session = frame.get("session_id").and_then(Value::as_str).unwrap_or("");
                 let host = serve::host_from_url(frame.get("url").and_then(Value::as_str).unwrap_or(""));
-                match serve::decide_fill(vault, &frame) {
-                    Some(fills) if !rid.is_empty() => {
+                let decided = match serve::decide_card_fill(vault, &frame) {
+                    Some(fills) => Some(("card ", fills)),
+                    None => serve::decide_fill(vault, &frame).map(|fills| ("", fills)),
+                };
+                match decided {
+                    Some((kind, fills)) if !rid.is_empty() => {
                         let mut out = serve::fill_response(rid, &fills);
-                        info!("fill: {} for session {:?} on {} — served {} field(s)", rid, session, host, fills.len());
+                        info!("fill: {} for session {:?} on {} — served {} {}field(s)", rid, session, host, fills.len(), kind);
                         drop(fills);
                         // The String moves into tungstenite's frame buffer; that copy is not
                         // ours to zeroize (README "Limits"), ours is emptied here.
